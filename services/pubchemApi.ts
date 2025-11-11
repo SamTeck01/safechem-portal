@@ -32,7 +32,7 @@ export interface PubChemSafetyData {
 }
 
 /**
- * Search for chemicals by name
+ * Search for chemicals by name (exact match)
  */
 export async function searchChemicalByName(name: string): Promise<PubChemCompound[]> {
   try {
@@ -57,6 +57,130 @@ export async function searchChemicalByName(name: string): Promise<PubChemCompoun
     }));
   } catch (error) {
     console.error('Error searching chemical:', error);
+    return [];
+  }
+}
+
+/**
+ * Autocomplete search - returns multiple chemicals matching the query
+ * This uses PubChem's autocomplete API for broader results
+ */
+export async function searchChemicalsAutocomplete(query: string, limit: number = 50): Promise<PubChemCompound[]> {
+  try {
+    // For very short queries (1-2 chars), use a different approach
+    if (query.length <= 2) {
+      // Try common chemicals starting with that letter
+      const commonChemicals: Record<string, string[]> = {
+        'a': ['acetone', 'ammonia', 'aspirin', 'acetic acid', 'acetaminophen', 'argon', 'arsenic'],
+        'b': ['benzene', 'butanol', 'bromine', 'barium', 'boron'],
+        'c': ['caffeine', 'chlorine', 'carbon', 'calcium', 'copper', 'chromium'],
+        'd': ['dextrose', 'dimethyl', 'dopamine'],
+        'e': ['ethanol', 'ethane', 'ether', 'epinephrine'],
+        'f': ['formaldehyde', 'fluorine', 'fructose'],
+        'g': ['glucose', 'glycerol', 'gold'],
+        'h': ['hydrogen', 'helium', 'hydrochloric acid'],
+        'i': ['iodine', 'iron', 'isopropanol', 'ibuprofen'],
+        'm': ['methanol', 'methane', 'mercury', 'magnesium'],
+        'n': ['nitrogen', 'neon', 'nickel', 'nitric acid'],
+        'o': ['oxygen', 'ozone'],
+        'p': ['propanol', 'propane', 'phosphorus', 'potassium'],
+        's': ['sulfuric acid', 'sodium', 'silver', 'sucrose'],
+        't': ['toluene', 'titanium'],
+        'w': ['water'],
+      };
+      
+      const firstChar = query.toLowerCase()[0];
+      const suggestions = commonChemicals[firstChar] || [];
+      
+      // Filter by query if 2 chars
+      const filtered = query.length === 2 
+        ? suggestions.filter(s => s.toLowerCase().startsWith(query.toLowerCase()))
+        : suggestions;
+      
+      if (filtered.length > 0) {
+        // Fetch these common chemicals
+        const searchPromises = filtered.slice(0, 10).map(async (name) => {
+          try {
+            const results = await searchChemicalByName(name);
+            return results[0] || null;
+          } catch {
+            return null;
+          }
+        });
+        
+        const results = await Promise.all(searchPromises);
+        return results.filter((r): r is PubChemCompound => r !== null);
+      }
+    }
+    
+    // Step 1: Get CIDs from autocomplete
+    const autocompleteResponse = await fetch(
+      `https://pubchem.ncbi.nlm.nih.gov/rest/autocomplete/compound/${encodeURIComponent(query)}/json?limit=${limit}`
+    );
+
+    if (!autocompleteResponse.ok) {
+      return [];
+    }
+
+    const autocompleteData = await autocompleteResponse.json();
+    const suggestions = autocompleteData.dictionary_terms?.compound || [];
+
+    if (suggestions.length === 0) {
+      return [];
+    }
+
+    // Step 2: For each suggestion, get the CID
+    const cidPromises = suggestions.slice(0, 20).map(async (name: string) => {
+      try {
+        const cidResponse = await fetch(
+          `${PUBCHEM_BASE_URL}/compound/name/${encodeURIComponent(name)}/cids/JSON`
+        );
+        
+        if (!cidResponse.ok) return null;
+        
+        const cidData = await cidResponse.json();
+        return { name, cid: cidData.IdentifierList?.CID?.[0] };
+      } catch {
+        return null;
+      }
+    });
+
+    const cidResults = await Promise.all(cidPromises);
+    const validCids = cidResults.filter((r): r is { name: string; cid: number } => r !== null && r.cid);
+
+    if (validCids.length === 0) {
+      return [];
+    }
+
+    // Step 3: Batch fetch compound details
+    const cids = validCids.map(r => r.cid).join(',');
+    const detailsResponse = await fetch(
+      `${PUBCHEM_BASE_URL}/compound/cid/${cids}/JSON`
+    );
+
+    if (!detailsResponse.ok) {
+      return [];
+    }
+
+    const detailsData = await detailsResponse.json();
+    const compounds = detailsData.PC_Compounds || [];
+
+    // Map compounds with their names
+    return compounds.map((compound: any) => {
+      const cid = compound.id.id.cid;
+      const matchedName = validCids.find(v => v.cid === cid)?.name || `Compound ${cid}`;
+      
+      return {
+        cid,
+        name: matchedName,
+        molecularFormula: compound.props.find((p: any) => p.urn.label === 'Molecular Formula')?.value?.sval || '',
+        molecularWeight: compound.props.find((p: any) => p.urn.label === 'Molecular Weight')?.value?.fval || 0,
+        iupacName: compound.props.find((p: any) => p.urn.label === 'IUPAC Name')?.value?.sval,
+        canonicalSmiles: compound.props.find((p: any) => p.urn.label === 'SMILES')?.value?.sval,
+      };
+    });
+  } catch (error) {
+    console.error('Error in autocomplete search:', error);
     return [];
   }
 }
@@ -161,8 +285,42 @@ export async function getChemicalSafetyData(cid: number): Promise<PubChemSafetyD
  */
 export async function getChemicalProperties(cid: number) {
   try {
+    const url = `${PUBCHEM_BASE_URL}/compound/cid/${cid}/property/MolecularFormula,MolecularWeight,IUPACName,CanonicalSMILES,InChI,InChIKey/JSON`;
+    console.log('Fetching properties for CID:', cid);
+    
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      console.error(`PubChem API error for CID ${cid}:`, response.status);
+      throw new Error(`PubChem API error: ${response.status}`);
+    }
+
+    const data = await response.json();
+    const properties = data.PropertyTable?.Properties?.[0];
+    
+    if (!properties) {
+      console.error(`No properties found for CID ${cid}`);
+      return null;
+    }
+    
+    console.log('Properties loaded for CID:', cid, properties);
+    return properties;
+  } catch (error) {
+    console.error('Error fetching properties for CID', cid, ':', error);
+    return null;
+  }
+}
+
+/**
+ * Get compounds by CID range for feed (batch request)
+ */
+export async function getCompoundsByCIDRange(startCid: number, count: number): Promise<PubChemCompound[]> {
+  try {
+    // Create comma-separated list of CIDs
+    const cids = Array.from({ length: count }, (_, i) => startCid + i).join(',');
+    
     const response = await fetch(
-      `${PUBCHEM_BASE_URL}/compound/cid/${cid}/property/MolecularFormula,MolecularWeight,IUPACName,CanonicalSMILES,InChI,InChIKey/JSON`
+      `${PUBCHEM_BASE_URL}/compound/cid/${cids}/JSON`
     );
 
     if (!response.ok) {
@@ -170,10 +328,53 @@ export async function getChemicalProperties(cid: number) {
     }
 
     const data = await response.json();
-    return data.PropertyTable?.Properties?.[0] || null;
+    const compounds = data.PC_Compounds || [];
+
+    return compounds.map((compound: any) => ({
+      cid: compound.id.id.cid,
+      name: compound.props.find((p: any) => p.urn.label === 'IUPAC Name')?.value?.sval || `Compound ${compound.id.id.cid}`,
+      molecularFormula: compound.props.find((p: any) => p.urn.label === 'Molecular Formula')?.value?.sval || '',
+      molecularWeight: compound.props.find((p: any) => p.urn.label === 'Molecular Weight')?.value?.fval || 0,
+      iupacName: compound.props.find((p: any) => p.urn.label === 'IUPAC Name')?.value?.sval,
+      canonicalSmiles: compound.props.find((p: any) => p.urn.label === 'SMILES')?.value?.sval,
+    }));
   } catch (error) {
-    console.error('Error fetching properties:', error);
-    return null;
+    console.error('Error fetching compounds by CID range:', error);
+    return [];
+  }
+}
+
+/**
+ * Get random compounds by array of CIDs (for random feed)
+ */
+export async function getCompoundsByCIDs(cids: number[]): Promise<PubChemCompound[]> {
+  try {
+    // Create comma-separated list of CIDs
+    const cidList = cids.join(',');
+    
+    const response = await fetch(
+      `${PUBCHEM_BASE_URL}/compound/cid/${cidList}/JSON`
+    );
+
+    if (!response.ok) {
+      // Some CIDs might not exist, that's okay
+      return [];
+    }
+
+    const data = await response.json();
+    const compounds = data.PC_Compounds || [];
+
+    return compounds.map((compound: any) => ({
+      cid: compound.id.id.cid,
+      name: compound.props.find((p: any) => p.urn.label === 'IUPAC Name')?.value?.sval || `Compound ${compound.id.id.cid}`,
+      molecularFormula: compound.props.find((p: any) => p.urn.label === 'Molecular Formula')?.value?.sval || '',
+      molecularWeight: compound.props.find((p: any) => p.urn.label === 'Molecular Weight')?.value?.fval || 0,
+      iupacName: compound.props.find((p: any) => p.urn.label === 'IUPAC Name')?.value?.sval,
+      canonicalSmiles: compound.props.find((p: any) => p.urn.label === 'SMILES')?.value?.sval,
+    }));
+  } catch (error) {
+    console.error('Error fetching compounds by CIDs:', error);
+    return [];
   }
 }
 

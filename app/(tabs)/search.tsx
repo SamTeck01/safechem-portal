@@ -1,10 +1,10 @@
 import React, { useState } from 'react';
-import { View, Text, FlatList, useColorScheme } from 'react-native';
+import { View, Text, FlatList, useColorScheme, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
 import { LiquidGlassSearch } from '@/components/LiquidGlassSearch';
 import { ChemicalCard } from '@/components/ChemicalCard';
-import { chemicals } from '@/data/chemicals';
+import { useHybridSearch } from '@/hooks/useHybridSearch';
 
 export default function SearchScreen() {
   const router = useRouter();
@@ -12,12 +12,8 @@ export default function SearchScreen() {
   const isDark = colorScheme === 'dark';
   const [searchQuery, setSearchQuery] = useState('');
 
-  const searchResults = chemicals.filter(chemical =>
-    chemical.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    chemical.formula.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    chemical.casNumber.includes(searchQuery) ||
-    chemical.description.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Use hybrid search (cached + API)
+  const { results: searchResults, loading: searchLoading, hasCachedResults } = useHybridSearch(searchQuery);
 
   const handleChemicalPress = (id: string) => {
     router.push(`/chemical/${id}` as any);
@@ -66,12 +62,31 @@ export default function SearchScreen() {
           keyExtractor={(item) => item.id}
           ListHeaderComponent={
             <View className="px-4 py-3 border-b" style={{ borderBottomColor: isDark ? '#2A3942' : '#EFF3F4' }}>
-              <Text 
-                className="text-sm font-semibold"
-                style={{ color: isDark ? '#8696A0' : '#536471' }}
-              >
-                {searchResults.length} {searchResults.length === 1 ? 'result' : 'results'}
-              </Text>
+              <View className="flex-row items-center justify-between">
+                <Text 
+                  className="text-sm font-semibold"
+                  style={{ color: isDark ? '#8696A0' : '#536471' }}
+                >
+                  {searchResults.length} {searchResults.length === 1 ? 'result' : 'results'}
+                </Text>
+                {hasCachedResults && (
+                  <View 
+                    className="flex-row items-center px-2 py-1 rounded-full"
+                    style={{ backgroundColor: isDark ? '#1F2C34' : '#F0FDF4' }}
+                  >
+                    <Ionicons name="flash" size={12} color="#10B981" />
+                    <Text 
+                      className="ml-1 text-xs font-semibold"
+                      style={{ color: '#10B981' }}
+                    >
+                      Instant
+                    </Text>
+                  </View>
+                )}
+                {searchLoading && (
+                  <ActivityIndicator size="small" color="#10B981" />
+                )}
+              </View>
             </View>
           }
           renderItem={({ item }) => (

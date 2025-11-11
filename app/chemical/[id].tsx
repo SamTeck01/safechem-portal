@@ -1,10 +1,11 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, useColorScheme } from 'react-native';
+import React, { useEffect, useState } from 'react';
+import { View, Text, TouchableOpacity, useColorScheme, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import ParallaxScrollView from '@/components/parallax-scroll-view';
 import { LinearGradient } from 'expo-linear-gradient';
-import { getChemicalWithSDS } from '@/data/chemicals';
+import { getChemicalProperties, getChemicalSafetyData } from '@/services/pubchemApi';
+import { generateSDSFromPubChem, SDSData } from '@/utils/generateSDS';
 
 const hazardColors = {
   Low: "#10B981",
@@ -13,23 +14,111 @@ const hazardColors = {
   Extreme: "#EF4444",
 };
 
+interface ChemicalData {
+  id: string;
+  name: string;
+  formula: string;
+  casNumber: string;
+  category: string;
+  hazardLevel: 'Low' | 'Moderate' | 'High' | 'Extreme';
+  description: string;
+  sds: SDSData;
+}
+
 export default function ChemicalDetailScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const colorScheme = useColorScheme();
   const isDark = colorScheme === "dark";
+  
+  const [loading, setLoading] = useState(true);
+  const [chemicalData, setChemicalData] = useState<ChemicalData | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const chemicalData = getChemicalWithSDS(id);
+  useEffect(() => {
+    loadChemicalData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
 
-  if (!chemicalData) {
+  const loadChemicalData = async () => {
+    try {
+      setLoading(true);
+      const cid = parseInt(id);
+      
+      if (isNaN(cid)) {
+        throw new Error('Invalid chemical ID');
+      }
+      
+      // Fetch properties and safety data
+      const [properties, safetyData] = await Promise.all([
+        getChemicalProperties(cid),
+        getChemicalSafetyData(cid).catch(() => undefined),
+      ]);
+
+      if (!properties) {
+        throw new Error('Chemical not found in PubChem database');
+      }
+
+      const name = properties.Title || properties.IUPACName || `Compound ${cid}`;
+      const formula = properties.MolecularFormula || 'Unknown';
+      const molecularWeight = parseFloat(properties.MolecularWeight) || 0;
+      
+      // Generate SDS from PubChem data
+      const sds = generateSDSFromPubChem(cid, name, formula, molecularWeight, safetyData);
+      
+      // Determine hazard level
+      const hazardLevel: 'Low' | 'Moderate' | 'High' | 'Extreme' = 
+        sds.signalWord === 'DANGER' ? 'High' : 'Moderate';
+
+      setChemicalData({
+        id: id,
+        name,
+        formula,
+        casNumber: `CID: ${cid}`,
+        category: 'Chemical',
+        hazardLevel,
+        description: `Molecular Weight: ${molecularWeight.toFixed(2)} g/mol`,
+        sds,
+      });
+    } catch (err: any) {
+      console.error('Error loading chemical:', err);
+      setError(err.message || 'Failed to load chemical data');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (loading) {
     return (
       <View
         className="flex-1 items-center justify-center"
         style={{ backgroundColor: isDark ? "#111B21" : "#FFFFFF" }}
       >
-        <Text style={{ color: isDark ? "#E9EDEF" : "#0F1419" }}>
-          Chemical not found
+        <ActivityIndicator size="large" color="#10B981" />
+        <Text className="mt-4" style={{ color: isDark ? "#E9EDEF" : "#0F1419" }}>
+          Loading chemical data from PubChem...
         </Text>
+      </View>
+    );
+  }
+
+  if (error || !chemicalData) {
+    return (
+      <View
+        className="flex-1 items-center justify-center px-8"
+        style={{ backgroundColor: isDark ? "#111B21" : "#FFFFFF" }}
+      >
+        <Ionicons name="alert-circle" size={64} color="#EF4444" />
+        <Text className="mt-4 text-lg font-bold text-center" style={{ color: isDark ? "#E9EDEF" : "#0F1419" }}>
+          {error || 'Chemical not found'}
+        </Text>
+        <TouchableOpacity
+          onPress={() => router.back()}
+          className="mt-6 px-6 py-3 rounded-full"
+          style={{ backgroundColor: "#10B981" }}
+        >
+          <Text className="text-white font-semibold">Go Back</Text>
+        </TouchableOpacity>
       </View>
     );
   }
